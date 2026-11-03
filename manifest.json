@@ -13,6 +13,10 @@
    "sha256": "bbb652bcd186ef3c64988e5abf63d3c602f5a7b1acc03b205261f5023d5ea1b6"
   },
   {
+   "path": "images/icon.ico",
+   "sha256": "e8aabb346dea64acc03948c74a431631b8f6a8c54f98a3e06387de07c041bd3f"
+  },
+  {
    "path": "images/icon.png",
    "sha256": "0cb13a404bae827644a8d235d27a0dddd954297033bef0387e3d9211ab293d6b"
   },
