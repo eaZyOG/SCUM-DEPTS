@@ -1,0 +1,44 @@
+{
+ "files": [
+  {
+   "path": "schuldenwache_client.py",
+   "sha256": "fc121e0decdbd61aae81d41e4df089aa499d85307c366ac3fb98493426607361"
+  },
+  {
+   "path": "schuldenwache_launcher.pyw",
+   "sha256": "7e0e75a850de890b82114ccd6497b4d9fa8e7e997e97e05177d0d89fb3a262c8"
+  },
+  {
+   "path": "schuldenwache_setup.py",
+   "sha256": "bbb652bcd186ef3c64988e5abf63d3c602f5a7b1acc03b205261f5023d5ea1b6"
+  },
+  {
+   "path": "images/icon.png",
+   "sha256": "0cb13a404bae827644a8d235d27a0dddd954297033bef0387e3d9211ab293d6b"
+  },
+  {
+   "path": "sounds/alarm.wav",
+   "sha256": "a6c8f609fbeae541bd4738660fc6e017959503a1dba2e6802c9d7ec19a9efab4"
+  },
+  {
+   "path": "sounds/notify.wav",
+   "sha256": "85c47e810ee127e8f872b04c64b1833034cd67cd9e6698bd88cb6e91a3a547bd"
+  },
+  {
+   "path": "sounds/paid.wav",
+   "sha256": "f513a8eec92f582690df96329a414040738d626a37936cf0489f0e269f09e412"
+  },
+  {
+   "path": "sounds/penalty.wav",
+   "sha256": "45499a2cd9c4d50332584efc1329163a03a45bfe7eb692af2a50ae6482baf43a"
+  },
+  {
+   "path": "sounds/tick.wav",
+   "sha256": "fb1d922c4bd7f8e94a2dc354228b2c16d2db3df2ba23373c14adc9fac7a20b77"
+  },
+  {
+   "path": "sounds/warn.wav",
+   "sha256": "dc0897632b3b22f0c7251b4332d28564d484f4e9cee6be110809fc726669853d"
+  }
+ ]
+}
