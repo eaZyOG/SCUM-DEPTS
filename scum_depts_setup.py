@@ -25,9 +25,10 @@ def _migrate(*names):
                 pass
 
 
-_migrate("layout.json")
+_migrate("layout.json", "client.json")
 
 LAYOUT_FILE = os.path.join(BASE, "scum_depts_layout.json")
+CONFIG_FILE = os.path.join(BASE, "scum_depts_client.json")   # Host-Adresse + Name (vom Client gelesen)
 PIX_TOL = 45        # erlaubte Farbabweichung pro Kanal (0-255)
 
 
@@ -218,6 +219,21 @@ def setup_ui():
         save_layout_key("check_colors", {})
         messagebox.showinfo("OK", "Check-Farben gelöscht (Bereichs-Prüfung aus).")
 
+    # ---- Verbindungsdaten (der Client hat kein Konsolenfenster mehr und kann nicht nachfragen)
+    try:
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    cf = ttk.LabelFrame(root, text="Verbindung zum Host", padding=8)
+    cf.pack(fill="x", padx=10, pady=(0, 6))
+    host_var = tk.StringVar(value=cfg.get("host", ""))
+    name_var = tk.StringVar(value=cfg.get("name", ""))
+    ttk.Label(cf, text="Adresse des Hosts (IP/DynDNS):").grid(row=0, column=0, sticky="w")
+    ttk.Entry(cf, textvariable=host_var, width=30).grid(row=0, column=1, padx=6, pady=2)
+    ttk.Label(cf, text="Dein Name:").grid(row=1, column=0, sticky="w")
+    ttk.Entry(cf, textvariable=name_var, width=30).grid(row=1, column=1, padx=6, pady=2)
+
     cb = ttk.Frame(root)
     cb.pack()
     ttk.Button(cb, text="Farben aufnehmen", command=capture).pack(side="left", padx=3)
@@ -225,6 +241,16 @@ def setup_ui():
     ttk.Button(cb, text="Checks löschen", command=clear_checks).pack(side="left", padx=3)
 
     def save():
+        host, name = host_var.get().strip(), name_var.get().strip()
+        if not host or not name:
+            messagebox.showwarning("Verbindung", "Bitte Adresse des Hosts und deinen Namen eintragen.")
+            return
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(dict(host=host, name=name), f, indent=1)
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Verbindungsdaten nicht speicherbar: {e}")
+            return
         for k, t in wins.items():
             if k not in CHECKS:          # Check-Positionen werden nur beim Aufnehmen gespeichert
                 save_layout_key(k, [t.winfo_x(), t.winfo_y()])

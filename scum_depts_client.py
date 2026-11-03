@@ -14,7 +14,7 @@ Optional im selben Ordner (nichts davon ist Pflicht):
   fonts/    eigene Schrift (.ttf/.otf) - wird automatisch fürs Overlay benutzt
   images/icon.png   kleines Symbol (max. ~48 px) im Kopf der Schulden-Anzeige
 """
-import argparse, collections, json, math, socket, string, struct, threading, time, ctypes, os
+import argparse, collections, json, math, socket, string, struct, sys, threading, time, ctypes, os
 import traceback, types, wave
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -720,6 +720,21 @@ def load_cfg():
         return {}
 
 
+def ask(prompt):
+    """Konsole, falls vorhanden - sonst ein kleines Eingabefenster (Start ohne cmd-Fenster)."""
+    try:
+        if sys.stdin is None:
+            raise RuntimeError("keine Konsole")
+        return input(prompt + ": ").strip()
+    except Exception:
+        from tkinter import simpledialog
+        r = tk.Tk()
+        r.withdraw()
+        v = simpledialog.askstring("SCUM-DEPTS", prompt + ":", parent=r)
+        r.destroy()
+        return (v or "").strip()
+
+
 def main():
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)   # echte Pixel-Koordinaten
@@ -733,10 +748,14 @@ def main():
     cfg = {} if args.neu else load_cfg()
     if args.host:
         cfg["host"] = args.host
-    host = cfg.get("host") or input("Adresse des Hosts (IP/DynDNS): ").strip()
-    name = cfg.get("name") or input("Dein Name: ").strip()
+    host = cfg.get("host") or ask("Adresse des Hosts (IP/DynDNS)")
+    name = cfg.get("name") or ask("Dein Name")
     if not (host and name):
-        print("Host und Name werden benötigt.")
+        try:
+            messagebox.showerror("SCUM-DEPTS", "Host-Adresse und Name werden benötigt.\n"
+                                               "Trage sie im Setup ein (scum_depts_setup.py).")
+        except Exception:
+            print("Host und Name werden benötigt.")
         return
     print(f"Verbinde als {name} mit {host}:{PORT}   (Änderungen: --neu)")
     print("Die Strafe läuft nur, wenn SCUM im Vordergrund ist. Notbremse: Strg+Shift+F12")
