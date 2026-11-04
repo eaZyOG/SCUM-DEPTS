@@ -55,7 +55,6 @@ MARKERS = {   # key: (Beschriftung, Breite, Höhe)
     "payment": ("Zahlungsfenster", 300, 240),
     "p1": ("Punkt 1", 110, 36),
     "p2": ("Punkt 2", 110, 36),
-    "p3": ("Punkt 3", 110, 36),
     "check1": ("Check 1", 40, 40),
     "check2": ("Check 2", 40, 40),
     "check3": ("Check 3", 40, 40),
@@ -75,7 +74,7 @@ def virtual_screen(sw, sh):
 def load_layout(sw, sh):
     d = {"stats": [sw - 420, 20], "countdown": [sw // 2 - 130, 150],
          "banner": [sw // 2 - 350, 60], "payment": [100, 100],
-         "p1": [sw // 2 - 200, sh // 2], "p2": [sw // 2, sh // 2], "p3": [sw // 2 + 200, sh // 2],
+         "p1": [sw // 2 - 100, sh // 2], "p2": [sw // 2 + 100, sh // 2],
          "check1": [sw // 2 - 100, sh - 150], "check2": [sw // 2, sh - 150],
          "check3": [sw // 2 + 100, sh - 150]}
     try:
@@ -101,9 +100,26 @@ def save_layout_key(key, value):
         json.dump(d, f, indent=1)
 
 
+def set_icon(win):
+    """Fenster-Symbol aus images/icon.png (statt der Python-Feder); gilt auch für Dialoge."""
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("scum.depts")
+    except Exception:
+        pass
+    p = os.path.join(BASE, "images", "icon.png")
+    try:
+        if os.path.exists(p):
+            img = tk.PhotoImage(file=p)
+            win.iconphoto(True, img)
+            win._icon_ref = img
+    except Exception:
+        pass
+
+
 def setup_ui():
     root = tk.Tk()
     root.title("SCUM-DEPTS - Setup")
+    set_icon(root)
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
     lay = load_layout(sw, sh)
     wins = {}
@@ -127,7 +143,7 @@ def setup_ui():
         t.attributes("-topmost", True)
         t.attributes("-alpha", 0.85)
         t.geometry(f"{w}x{h}+{lay[k][0]}+{lay[k][1]}")
-        if k in ("p1", "p2", "p3", "check1", "check2", "check3"):
+        if k in ("p1", "p2", "check1", "check2", "check3"):
             # Fadenkreuz: der rote Punkt in der Mitte ist der Pixel, der gemessen / angefahren wird
             lb = tk.Canvas(t, width=w, height=h, bg=colors.get(k, "#505050"),
                            highlightthickness=0, bd=0)
@@ -150,7 +166,7 @@ def setup_ui():
     ttk.Label(root, justify="left", padding=10, text=(
         "Ziehe die farbigen Fenster an die gewünschte Stelle\n"
         "(Spiel dafür im gleichen Modus wie später laufen lassen).\n"
-        "Punkt 1-3: Mittelpunkt = Zielpunkt für 'moveto p1' im Makro.\n"
+        "Punkt 1-2: Mittelpunkt = Zielpunkt für 'moveto p1' im Makro.\n"
         "Bei Punkten und Checks zeigt der ROTE PUNKT im Fadenkreuz den genauen Pixel.\n"
         "Check 1-3 (lila): über Bildelemente legen, die NUR im normalen Spiel zu sehen\n"
         "sind (z.B. Lebensanzeige/Hotbar), nicht im Menü - dann 'Farben aufnehmen'.\n"

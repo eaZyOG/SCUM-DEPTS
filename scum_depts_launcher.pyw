@@ -58,6 +58,20 @@ def update():
             os.remove(tmp)
 
 
+def ensure_pynput():
+    """Falls pynput fehlt (z. B. PC gewechselt): unsichtbar nachinstallieren."""
+    import importlib.util
+    if importlib.util.find_spec("pynput") is not None:
+        return
+    exe = sys.executable
+    py = exe[:-len("pythonw.exe")] + "python.exe" if exe.lower().endswith("pythonw.exe") else exe
+    try:
+        subprocess.run([py, "-m", "pip", "install", "--user", "--disable-pip-version-check", "pynput"],
+                       creationflags=NOWIN, capture_output=True, timeout=300)
+    except Exception:
+        pass
+
+
 def run(script, wait):
     cmd = [sys.executable, os.path.join(BASE, script)]
     if wait:
@@ -71,6 +85,7 @@ def main():
         update()
     except Exception:
         pass   # offline oder Server nicht erreichbar -> mit vorhandenen Dateien weiter
+    ensure_pynput()
     if not os.path.exists(LAYOUT):
         run("scum_depts_setup.py", wait=True)
     run("scum_depts_client.py", wait=False)

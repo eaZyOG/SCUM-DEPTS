@@ -12,12 +12,13 @@ Spiel im Fenster- oder Rahmenlos-Modus laufen lassen (Overlay geht nicht im exkl
 Optional im selben Ordner (nichts davon ist Pflicht):
   sounds/   eigene .wav-Dateien: notify, paid, warn, tick, alarm, penalty (ersetzen die Standardtöne)
   fonts/    eigene Schrift (.ttf/.otf) - wird automatisch fürs Overlay benutzt
-  images/icon.png   kleines Symbol (max. ~48 px) im Kopf der Schulden-Anzeige
+  images/icon.png   Symbol: im Kopf der DEPT-Anzeige und als Fenster-Symbol
 """
 import argparse, collections, json, math, socket, string, struct, sys, threading, time, ctypes, os
 import traceback, types, wave
 import tkinter as tk
 from tkinter import ttk, messagebox
+from tkinter import font as tkfont
 
 try:
     import winsound
@@ -45,20 +46,23 @@ GAME = "scum"      # Prozess-/Fenstername des Spiels (SCUM.exe)
 CONFIG_FILE = os.path.join(BASE, "scum_depts_client.json")
 
 LAYOUT_FILE = os.path.join(BASE, "scum_depts_layout.json")
-ABORT_HOTKEY = "<ctrl>+<shift>+<f12>"          # Notbremse
 MAX_SECS = 180                                  # Makro bricht spätestens nach 3 Min ab
 PIX_TOL = 45                                    # erlaubte Farbabweichung pro Kanal (0-255)
 
 # ---- Overlay-Design
 ALPHA = 0.93                       # Gesamt-Transparenz des Overlays
-COUNTDOWN_FROM = 3600              # Countdown-Feld ab 1 Stunde (echte Zeit)
-REMIND_EVERY = 1800                # zusätzliche Erinnerung alle 30 Min (echte Zeit)
-THRESHOLDS = (86400, 57600, 28800, 14400, 7200, 3600, 1800, 600, 300, 120, 60)   # Meldungen (echte Sek.)
+PANEL_STIPPLE = "gray25"           # Hintergrund der Anzeigen: gray12 = fast unsichtbar ... gray50 = dichter
+COUNTDOWN_GAME = 86400             # Countdown-Uhr ab 1 Spieltag Restzeit (Spielsekunden)
+FINAL_GAME = 30                    # letzte halbe Spielminute wird sekundengenau abgezählt
+HOUR_MARKS = (9, 6, 3)             # Meldungen bei noch 9 / 6 / 3 Spielstunden (zusätzlich: jeder volle Tag)
+SKIP_AFTER = 1.0                   # Meldung per ESC überspringen, wenn sie mind. so lange (Sek.) sichtbar war
 SLIDE = 0.35                       # Ein-/Ausblend-Dauer der Meldungen
 FONT_PREFERENCE = ["Bahnschrift", "Agency FB", "Segoe UI Semibold", "Segoe UI"]
 SOUND_DIR = os.path.join(BASE, "sounds")      # eigene .wav hier ablegen ersetzen die Standardtöne
 FONT_DIR = os.path.join(BASE, "fonts")        # optional: eigene .ttf/.otf
 ICON_FILE = os.path.join(BASE, "images", "icon.png")   # optional: kleines Symbol (max ~48 px)
+BG, PANEL, LINE, MUTED, TEXT = "#0f1217", "#171b22", "#2b313c", "#8a93a3", "#ffffff"
+ACCENT, GOOD, WARN = "#ffb020", "#3ddc84", "#ff6b35"
 LEVEL_COL = {"info": "#4aa8ff", "good": "#3ddc84", "warn": "#ffb020", "alarm": "#ff3b30"}
 SOUND_FOR = {"info": "notify", "good": "paid", "warn": "warn", "alarm": "alarm"}
 
@@ -120,7 +124,7 @@ def parse_macro(text):
             elif p[0] == "move":
                 steps.append(("move", max(-3000, min(3000, int(p[1]))),
                               max(-3000, min(3000, int(p[2])))))
-            elif p[0] == "moveto" and p[1] in ("p1", "p2", "p3"):
+            elif p[0] == "moveto" and p[1] in ("p1", "p2"):
                 steps.append(("moveto", p[1]))
             elif p[0] == "click" and p[1] in ("left", "right"):
                 steps.append(("click", p[1]))
@@ -139,7 +143,6 @@ MARKERS = {   # key: (Beschriftung, Breite, Höhe)
     "payment": ("Zahlungsfenster", 300, 240),
     "p1": ("Punkt 1", 110, 36),
     "p2": ("Punkt 2", 110, 36),
-    "p3": ("Punkt 3", 110, 36),
     "check1": ("Check 1", 40, 40),
     "check2": ("Check 2", 40, 40),
     "check3": ("Check 3", 40, 40),
@@ -159,7 +162,7 @@ def virtual_screen(sw, sh):
 def load_layout(sw, sh):
     d = {"stats": [sw - 420, 20], "countdown": [sw // 2 - 130, 150],
          "banner": [sw // 2 - 350, 60], "payment": [100, 100],
-         "p1": [sw // 2 - 200, sh // 2], "p2": [sw // 2, sh // 2], "p3": [sw // 2 + 200, sh // 2],
+         "p1": [sw // 2 - 100, sh // 2], "p2": [sw // 2 + 100, sh // 2],
          "check1": [sw // 2 - 100, sh - 150], "check2": [sw // 2, sh - 150],
          "check3": [sw // 2 + 100, sh - 150]}
     try:
@@ -217,22 +220,27 @@ def nfmt(x):
 
 
 def spiel_rest(rem, speed=3):
-    """Restzeit in Spielzeit-Einheiten (Tage/Stunden/Minuten)."""
+    """Restzeit in Spielzeit-Einheiten (Tage/Stunden/Minuten/Sekunden)."""
     s = int(max(0, rem) * speed)
     d, r = divmod(s, 86400)
     h, m = r // 3600, r % 3600 // 60
-    return f"{d} Tg {h} Std" if d else f"{h} Std {m} Min"
+    if d:
+        return f"{d} Tg {h} Std"
+    if h:
+        return f"{h} Std {m} Min"
+    return f"{m} Min {r % 60} Sek"
 
 
-def th_text(th, open_):
-    if th >= 28800:
-        n = th / 28800
-        t = f"Noch {n:g} Spieltag{'e' if n != 1 else ''}"
-    elif th >= 3600:
-        t = f"Noch {th // 3600} Std echt" + (" - Countdown startet" if th == 3600 else "")
-    else:
-        t = f"Noch {th // 60} Min"
-    return f"{t} - fällig: {nfmt(open_)}"
+def day_text(n):
+    return "Noch 1 Spieltag (Countdown startet)" if n == 1 else f"Noch {n} Spieltage"
+
+
+def set_app_id():
+    """Eigene Taskleisten-Gruppe, damit das Fenster-Symbol (icon.png) statt dem Python-Symbol erscheint."""
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("scum.depts")
+    except Exception:
+        pass
 
 
 def make_sounds():
@@ -276,10 +284,12 @@ class Client:
         self.status = "Verbinde..."
         self.sock = None
         self.cur_banner, self.bq = None, collections.deque()
-        self.last_rem, self.last_sec, self.last_remind = None, None, 0.0
+        self.last_rem, self.last_sec = None, None
         self.last_lbl, self.last_err = 0.0, None
-        self.icon, self.fam = None, "Segoe UI"
-        self.abort = threading.Event()
+        self.icon, self.win_icon, self.fam = None, None, "Segoe UI"
+        self.cw = {}                                # Zellbreiten für feste Ziffern (pro Schriftgröße)
+        self.visible, self.miss, self.last_chk, self.last_frame = True, 0, 0.0, None
+        self.esc_flag = False
         self.busy = False
         self.saved = False
 
@@ -308,6 +318,8 @@ class Client:
                 self.a.save()
         elif t == "msg":
             low = m["text"].lower()
+            if low.startswith("neue schulden"):
+                return
             if "nicht bezahlt" in low or "strafe" in low:
                 lvl = "alarm"
             elif "zahlt" in low or "erfüllt" in low or "getilgt" in low or "erlassen" in low:
@@ -346,9 +358,7 @@ class Client:
                 pass
 
     def nap(self, sec):
-        end = time.time() + sec
-        while time.time() < end and not self.abort.is_set():
-            time.sleep(min(0.05, max(0, end - time.time())))
+        time.sleep(max(0.0, sec))
 
     def point(self, key):
         x, y = self.lay[key]
@@ -369,19 +379,16 @@ class Client:
                 pass
         return ok * 2 > len(cols)
 
-    # ---- Strafe: Makro (einmalig; Whitelist, nur im Spiel, Notbremse)
+    # ---- Strafe: Makro (einmalig; Whitelist, nur im Spiel, wird sofort ausgeführt)
     def run_macro(self, text):
         try:
             steps = parse_macro(text)
         except ValueError as e:
             self.banner(f"Makro ungültig: {e}", 8, "warn")
             return
-        from pynput.keyboard import Controller as KC, Key, GlobalHotKeys
+        from pynput.keyboard import Controller as KC, Key
         from pynput.mouse import Controller as MC, Button
         self.busy = True
-        self.abort.clear()
-        hk = GlobalHotKeys({ABORT_HOTKEY: self.abort.set})
-        hk.start()
         kb, ms = KC(), MC()
         K = lambda n: n if len(n) == 1 else getattr(Key, n)
         warned = [False]
@@ -390,19 +397,13 @@ class Client:
             while not (game_in_front(self.a.game) and (not check_pixels or self.in_play())):
                 if not warned[0]:
                     warned[0] = True
-                    self.banner("Strafe pausiert (nicht im Spiel/Menü offen)", 4, "warn", now=True)
-                if self.abort.is_set() or time.time() > deadline:
+                    self.banner("Strafe wartet (nicht im Spiel/Menü offen)", 4, "warn", now=True)
+                if time.time() > deadline:
                     return False
                 time.sleep(0.3)
             warned[0] = False
-            return not self.abort.is_set()
+            return True
         try:
-            for i in range(5, 0, -1):
-                if self.abort.is_set():
-                    return
-                self.banner(f"STRAFE startet in {i}s  (Abbruch: Strg+Shift+F12)", 1.2, "alarm", sound=False, now=True)
-                self.play("tick")
-                time.sleep(1)
             deadline = time.time() + MAX_SECS
             for idx, st in enumerate(steps):
                 # Pixel-Check nur vor dem 1. Schritt: danach ist z.B. nach ESC absichtlich das Menü offen
@@ -422,7 +423,6 @@ class Client:
                 elif k == "click":
                     ms.click(Button.left if st[1] == "left" else Button.right)
         finally:
-            hk.stop()
             self.busy = False
             self.banner("Strafe beendet.", 4, "info")
 
@@ -449,35 +449,118 @@ class Client:
         except Exception:
             pass
 
-        win = tk.Toplevel(root)
-        win.title(f"Schulden - {self.a.name}")
-        px, py = self.lay["payment"]
-        win.geometry(f"+{px}+{py}")
-        self.lbl = ttk.Label(win, text="...", justify="left", font=("Segoe UI", 11))
-        self.lbl.pack(padx=12, pady=8)
-        ttk.Label(win, text="Betrag zahlen:").pack()
-        self.amount = ttk.Entry(win, width=14)
-        self.amount.pack(pady=4)
-        ttk.Button(win, text="Zahlen", command=self.pay).pack(pady=6)
-        self.stat = ttk.Label(win, text="")
-        self.stat.pack(pady=4)
-        self.macro_lbl = ttk.Label(win, text="", justify="left", foreground="#666")
-        self.macro_lbl.pack(padx=8, pady=4)
-        win.protocol("WM_DELETE_WINDOW", root.destroy)
-
+        self.build_window()
+        self.start_keys()
         threading.Thread(target=self.net_loop, daemon=True).start()
         self.draw()
         root.mainloop()
 
+    def start_keys(self):
+        """Globaler ESC-Listener (das Overlay ist klickdurchlässig und hat nie den Fokus)."""
+        try:
+            from pynput.keyboard import Listener, Key
+        except Exception:
+            return
+
+        def on_press(k):
+            if k == Key.esc:
+                self.esc_flag = True
+        try:
+            Listener(on_press=on_press).start()
+        except Exception:
+            pass
+
+    def build_window(self):
+        """Zahlungsfenster im Look der Anzeigen (dunkel, Akzentfarbe, ohne Makro-Anzeige)."""
+        win = self.win = tk.Toplevel(self.root)
+        win.title(f"DEPT - {self.a.name}")
+        win.configure(bg=BG)
+        win.resizable(False, False)
+        px, py = self.lay["payment"]
+        win.geometry(f"+{px}+{py}")
+        if self.win_icon:
+            try:
+                win.iconphoto(True, self.win_icon)
+            except Exception:
+                pass
+        F = lambda size, bold=False: (self.fam, size, "bold" if bold else "normal")
+        pad = 16
+
+        def sep():
+            tk.Frame(win, height=1, bg=LINE).pack(fill="x", padx=pad, pady=8)
+
+        head = tk.Frame(win, bg=BG)
+        head.pack(fill="x", padx=pad, pady=(14, 0))
+        if self.icon:
+            tk.Label(head, image=self.icon, bg=BG).pack(side="left", padx=(0, 10))
+        tb = tk.Frame(head, bg=BG)
+        tb.pack(side="left")
+        tk.Label(tb, text="DEPT", font=F(16, True), fg=TEXT, bg=BG).pack(anchor="w")
+        tk.Label(tb, text=self.a.name, font=F(9), fg=MUTED, bg=BG).pack(anchor="w")
+        self.pw_status = tk.Label(head, text="", font=F(9), fg=MUTED, bg=BG)
+        self.pw_status.pack(side="right", anchor="n")
+        sep()
+
+        card = tk.Frame(win, bg=PANEL, highlightthickness=1, highlightbackground=LINE)
+        card.pack(fill="x", padx=pad)
+        tk.Label(card, text="FÄLLIG", font=F(8, True), fg=MUTED, bg=PANEL).pack(anchor="w", padx=12, pady=(10, 0))
+        self.pw_due = tk.Label(card, text="-", font=F(26, True), fg=ACCENT, bg=PANEL)
+        self.pw_due.pack(anchor="w", padx=12)
+        self.pw_bar = tk.Canvas(card, height=8, width=300, bg="#232832", highlightthickness=0)
+        self.pw_bar.pack(fill="x", padx=12, pady=(6, 3))
+        self.pw_paid = tk.Label(card, text="", font=F(9), fg=MUTED, bg=PANEL)
+        self.pw_paid.pack(anchor="w", padx=12)
+        self.pw_frist = tk.Label(card, text="", font=F(10, True), fg=TEXT, bg=PANEL)
+        self.pw_frist.pack(anchor="w", padx=12, pady=(2, 10))
+        sep()
+
+        rows = tk.Frame(win, bg=BG)
+        rows.pack(fill="x", padx=pad)
+        rows.columnconfigure(1, weight=1)
+        self.pw = {}
+        for i, (key, label) in enumerate((("debt", "Dept gesamt"), ("mine", "Von dir gezahlt"),
+                                          ("missed", "Verpasst"), ("clock", "Spielzeit"))):
+            tk.Label(rows, text=label, font=F(10), fg=MUTED, bg=BG).grid(row=i, column=0, sticky="w", pady=1)
+            self.pw[key] = tk.Label(rows, text="-", font=F(10, True), fg=TEXT, bg=BG)
+            self.pw[key].grid(row=i, column=1, sticky="e", pady=1)
+        self.pw_pending = tk.Label(win, text="", font=F(9), fg="#ffcf5a", bg=BG)
+        self.pw_pending.pack(anchor="w", padx=pad)
+        sep()
+
+        tk.Label(win, text="BETRAG ZAHLEN", font=F(8, True), fg=MUTED, bg=BG).pack(anchor="w", padx=pad)
+        er = tk.Frame(win, bg=BG)
+        er.pack(fill="x", padx=pad, pady=(4, 8))
+        self.amount = tk.Entry(er, font=F(13, True), bg=PANEL, fg=TEXT, insertbackground=TEXT,
+                               relief="flat", justify="right", highlightthickness=1,
+                               highlightbackground=LINE, highlightcolor=ACCENT)
+        self.amount.pack(side="left", fill="x", expand=True, ipady=6)
+        self.amount.bind("<Return>", lambda e: self.pay())
+        tk.Button(er, text="Fälliger Betrag", command=self.fill_due, font=F(9), bg=PANEL, fg=MUTED,
+                  activebackground=LINE, activeforeground=TEXT, relief="flat", bd=0,
+                  cursor="hand2", padx=8).pack(side="left", padx=(6, 0), fill="y")
+        tk.Button(win, text="ZAHLEN", command=self.pay, font=F(11, True), bg=ACCENT, fg="#1a1205",
+                  activebackground="#ffc654", activeforeground="#1a1205", relief="flat", bd=0,
+                  cursor="hand2").pack(fill="x", padx=pad, ipady=7)
+        self.stat = tk.Label(win, text="", font=F(9), fg=MUTED, bg=BG, wraplength=300, justify="left")
+        self.stat.pack(anchor="w", padx=pad, pady=(6, 14))
+        win.protocol("WM_DELETE_WINDOW", self.root.destroy)
+
+    def fill_due(self):
+        st = self.state
+        if st and st["active"]:
+            self.amount.delete(0, "end")
+            self.amount.insert(0, str(max(0, st["installment"] - st["paid"])))
+
     def pay(self):
         try:
-            amt = int(self.amount.get())
+            amt = int(self.amount.get().replace(".", "").replace(" ", ""))
             if amt <= 0 or not self.sock:
                 raise ValueError
             send(self.sock, {"t": "pay", "amount": amt})
-            self.stat.config(text=f"Zahlung {amt} gesendet.")
+            self.stat.config(text=f"Zahlung {nfmt(amt)} gesendet.", fg=GOOD)
+            self.amount.delete(0, "end")
         except Exception:
-            self.stat.config(text="Ungültiger Betrag oder keine Verbindung.")
+            self.stat.config(text="Ungültiger Betrag oder keine Verbindung.", fg=WARN)
 
     @staticmethod
     def fmt(sec):
@@ -499,7 +582,6 @@ class Client:
 
     # ---- Schrift, Töne, Symbol
     def setup_assets(self):
-        from tkinter import font as tkfont
         before = set(tkfont.families(self.root))
         try:
             if os.path.isdir(FONT_DIR):
@@ -517,23 +599,45 @@ class Client:
             pass
         try:
             if os.path.exists(ICON_FILE):
+                self.win_icon = tk.PhotoImage(file=ICON_FILE)            # Fenster-Symbol (Titelleiste/Taskleiste)
                 img = tk.PhotoImage(file=ICON_FILE)
-                if img.width() > 48:
-                    img = img.subsample(max(1, img.width() // 48))
+                big = max(img.width(), img.height())
+                if big > 32:
+                    img = img.subsample(math.ceil(big / 32))               # Anzeige-Symbol max. ca. 32 px
                 self.icon = img
         except Exception:
-            self.icon = None
+            self.icon, self.win_icon = None, None
 
     def font(self, size, bold=True):
         return (self.fam, int(round(size)), "bold" if bold else "normal")
 
-    def txt(self, x, y, text, size, fill, anchor="nw", bold=True, shadow=2, width=None):
+    def txt(self, x, y, text, size, fill, anchor="nw", bold=True, shadow=1, width=None):
         kw = dict(anchor=anchor, font=self.font(size, bold))
         if width:
             kw["width"] = width
         if shadow:
             self.cv.create_text(x + shadow, y + shadow, text=text, fill="#050505", **kw)
         self.cv.create_text(x, y, text=text, fill=fill, **kw)
+
+    def fixed_text(self, x, y, text, size, fill, anchor="nw", colon=True):
+        """Zeichnet Ziffern in festen Zellen: nichts verschiebt sich, auch wenn der Doppelpunkt blinkt."""
+        key = int(round(size))
+        if key not in self.cw:
+            f = tkfont.Font(root=self.root, font=self.font(key))
+            self.cw[key] = (max(f.measure(d) for d in "0123456789"), f.measure(":"))
+        dw, cw = self.cw[key]
+        widths = [cw if ch == ":" else dw for ch in text]
+        total = sum(widths)
+        x0 = x - total if anchor in ("ne", "e", "se") else x - total / 2 if anchor in ("n", "center", "s") else x
+        v = "n" if anchor in ("nw", "ne", "n") else "center"
+        for ch, w in zip(text, widths):
+            if ch != ":" or colon:
+                self.txt(x0 + w / 2, y, ch, size, fill, anchor=v)
+            x0 += w
+
+    def panel(self, x1, y1, x2, y2):
+        """Halbdurchsichtiger Hintergrund (Raster), damit die Sicht aufs Spiel frei bleibt."""
+        self.cv.create_rectangle(x1, y1, x2, y2, fill=BG, stipple=PANEL_STIPPLE, outline=LINE)
 
     # ---- Zeichnen
     def draw(self):
@@ -546,8 +650,22 @@ class Client:
                 print(msg)
         self.root.after(33, self.draw)      # ~30 Bilder/s für die Animationen
 
+    def update_visibility(self, now):
+        """Pixel-Check alle 0.4 s: im Spiel -> Overlay sichtbar, sonst komplett ausgeblendet."""
+        if now - self.last_chk < 0.4:
+            return
+        self.last_chk = now
+        try:
+            ok = self.in_play()
+        except Exception:
+            ok = True
+        self.miss = 0 if ok else self.miss + 1
+        self.visible = ok or self.miss < 2          # erst nach 2 Fehlschlägen ausblenden (kein Flackern)
+
     def _draw(self):
         now, st = time.monotonic(), self.state
+        dt = now - self.last_frame if self.last_frame else 0.0
+        self.last_frame = now
         self.cv.delete("all")
         rem, open_ = None, 0
         if st and st["active"]:
@@ -556,68 +674,88 @@ class Client:
             self.check_reminders(st, rem, open_, now)
         else:
             self.last_rem = None
-        self.draw_stats(st, rem, open_, now)
-        if rem is not None and open_ > 0 and rem <= COUNTDOWN_FROM:
-            self.draw_countdown(rem, open_, now)
-        self.draw_banner(now)
+        self.update_visibility(now)
+        if self.visible:
+            self.draw_stats(st, rem, open_, now)
+            if rem is not None and open_ > 0 and rem * st["speed"] <= COUNTDOWN_GAME:
+                self.draw_countdown(rem, open_, now, st["speed"])
+            self.draw_banner(now)
+        else:                                       # nicht im Spiel: nichts zeichnen, Meldungen warten
+            self.esc_flag = False
+            if self.cur_banner:
+                self.cur_banner["t0"] += dt
         self.update_window(st, now)
 
     def check_reminders(self, st, rem, open_, now):
-        lr = self.last_rem
-        if lr is None or rem > lr + 5:                  # erster Stand oder neue Runde
-            self.last_remind = now
-        elif open_ > 0:
-            for th in THRESHOLDS:
-                if lr > th >= rem:
-                    lvl = "info" if th >= 14400 else "warn" if th >= 3600 else "alarm"
-                    self.banner(th_text(th, open_), 7, lvl)
-            if rem > COUNTDOWN_FROM and now - self.last_remind >= REMIND_EVERY:
-                self.last_remind = now
-                self.banner(f"Fällig: {nfmt(open_)} - noch {spiel_rest(rem, st['speed'])} (Spielzeit)", 6, "info")
+        """Meldungen in SPIELZEIT: jeder volle Tag, dann bei 9 / 6 / 3 Spielstunden."""
+        lr, sp = self.last_rem, st["speed"]
+        if lr is not None and rem <= lr + 5 and open_ > 0:      # sonst: erster Stand oder neue Runde
+            g, lg = rem * sp, lr * sp
+            for n in range(min(int(lg // 86400), 60), 0, -1):
+                if lg > n * 86400 >= g:
+                    self.banner(f"{day_text(n)} - fällig: {nfmt(open_)}", 7, "warn" if n == 1 else "info")
+            for h in HOUR_MARKS:
+                if lg > h * 3600 >= g:
+                    self.banner(f"Noch {h} Spielstunden - fällig: {nfmt(open_)}", 7,
+                                "alarm" if h <= 3 else "warn")
         self.last_rem = rem
+
+    def frist_txt(self, st, rem):
+        """Frist als Spielzeit: 'heute 20:00 Uhr', 'morgen 20:00 Uhr', 'in 3 Tagen, 20:00 Uhr'."""
+        gc = self.game_clock(st)
+        if gc is None:
+            return None
+        due = gc + rem * st["speed"]
+        day, t = int(due // 86400), self.clock_txt(due % 86400)
+        if day == 0:
+            return f"heute {t} Uhr"
+        return f"morgen {t} Uhr" if day == 1 else f"in {day} Tagen, {t} Uhr"
 
     def draw_stats(self, st, rem, open_, now):
         c = self.cv
         sx, sy = self.lay["stats"]
         W, H = MARKERS["stats"][1], MARKERS["stats"][2]
         pulse = 0.5 + 0.5 * math.sin(now * 3)
-        if rem is None:
-            col = "#8a93a3"
-        elif rem <= 3600:
+        gr = rem * st["speed"] if (st and rem is not None) else None     # Restzeit in Spielsekunden
+        if gr is None:
+            col = MUTED
+        elif gr <= 3 * 3600:
             col = mix("#ff6b35", "#ff2d2d", pulse)
-        elif rem <= 28800:
+        elif gr <= 86400:
             col = "#ff9f1a"
         else:
             col = "#ffcf5a"
-        c.create_rectangle(sx + 3, sy + 3, sx + W + 3, sy + H + 3, fill="#050505", outline="")
-        c.create_rectangle(sx, sy, sx + W, sy + H, fill="#0f1217", outline="#2b313c")
+        self.panel(sx, sy, sx + W, sy + H)
         c.create_rectangle(sx, sy, sx + W, sy + 4, fill=col, outline="")
-        tx = sx + 14
+        tx, ih = sx + 14, 0
         if self.icon:
+            ih = self.icon.height()
             c.create_image(sx + 12, sy + 12, image=self.icon, anchor="nw")
             tx = sx + 12 + self.icon.width() + 8
-        self.txt(tx, sy + 14, "SCHULDEN", 11, "#8a93a3", shadow=0)
+        self.txt(tx, sy + 12 + (ih or 20) / 2, "DEPT", 13, "#c9d1de", anchor="w")
+        top = 12 + max(ih, 32) + 8                  # Inhalt beginnt unterhalb des Symbols
         gc = self.game_clock(st) if st else None
+        self.txt(sx + W - 14, sy + 12, "UHRZEIT", 8, MUTED, anchor="ne")
         if gc is None:
-            clock = "--:--"
+            self.txt(sx + W - 14, sy + 24, "--:--", 22, TEXT, anchor="ne")
         else:
-            clock = f"{int(gc // 3600):02d}{':' if int(now) % 2 == 0 else ' '}{int(gc % 3600 // 60):02d}"
-        self.txt(sx + W - 14, sy + 12, "UHRZEIT", 8, "#8a93a3", anchor="ne", shadow=0)
-        self.txt(sx + W - 14, sy + 24, clock, 22, "#ffffff", anchor="ne", shadow=0)
+            clock = f"{int(gc // 3600):02d}:{int(gc % 3600 // 60):02d}"
+            self.fixed_text(sx + W - 14, sy + 24, clock, 22, TEXT, anchor="ne",
+                            colon=int(now) % 2 == 0)             # Doppelpunkt blinkt im Sekundentakt
         if st and st["active"]:
-            self.txt(sx + 14, sy + 48, "FÄLLIG", 9, "#8a93a3", shadow=0)
-            self.txt(sx + 14, sy + 60, nfmt(open_), 30, col, shadow=0)
-            self.txt(sx + 14, sy + 108, "REST (SPIELZEIT)", 9, "#8a93a3", shadow=0)
-            self.txt(sx + 14, sy + 120, spiel_rest(rem, st["speed"]), 18, "#ffffff", shadow=0)
-            dc = self.game_clock(st, rem)
-            small = f"{self.fmt(rem)} echt" + (f"  ·  Frist {self.clock_txt(dc)} Uhr" if dc is not None else "")
-            self.txt(sx + 14, sy + 148, small, 9, "#8a93a3", bold=False, shadow=0)
+            self.txt(sx + 14, sy + top, "FÄLLIG", 9, MUTED)
+            self.txt(sx + 14, sy + top + 12, nfmt(open_), 30, col)
+            self.txt(sx + 14, sy + top + 54, "REST (SPIELZEIT)", 9, MUTED)
+            self.txt(sx + 14, sy + top + 66, spiel_rest(rem, st["speed"]), 18, TEXT)
+            fr = self.frist_txt(st, rem)
+            if fr:
+                self.txt(sx + 14, sy + top + 94, f"Frist: {fr}", 9, MUTED, bold=False)
         elif st:
             done = (st.get("total") or 0) > 0
-            self.txt(sx + 14, sy + 70, "Alle Schulden getilgt" if done else "Keine offenen Schulden",
-                     16, "#3ddc84" if done else "#8a93a3", shadow=0)
+            self.txt(sx + 14, sy + top + 10, "Alle Schulden getilgt" if done else "Keine offenen Schulden",
+                     16, GOOD if done else MUTED)
         else:
-            self.txt(sx + 14, sy + 70, self.status, 14, "#8a93a3", shadow=0)
+            self.txt(sx + 14, sy + top + 10, self.status, 14, MUTED)
         if st:
             total = st.get("total") or st["debt"]
             repaid = max(0, total - st["debt"])
@@ -625,44 +763,50 @@ class Client:
             c.create_rectangle(sx + 14, sy + H - 30, sx + W - 14, sy + H - 24, fill="#232832", outline="")
             if ratio > 0:
                 c.create_rectangle(sx + 14, sy + H - 30, sx + 14 + (W - 28) * ratio, sy + H - 24,
-                                   fill="#3ddc84", outline="")
-            self.txt(sx + 14, sy + H - 20, f"getilgt {nfmt(repaid)} / {nfmt(total)}", 9, "#8a93a3",
-                     bold=False, shadow=0)
+                                   fill=GOOD, outline="")
+            self.txt(sx + 14, sy + H - 20, f"getilgt {nfmt(repaid)} / {nfmt(total)}", 9, MUTED, bold=False)
             if st["pending"]:
                 self.txt(sx + W - 14, sy + H - 20, f"{nfmt(st['pending'])} warten auf Bestätigung", 9,
-                         "#ffcf5a", anchor="ne", shadow=0)
+                         "#ffcf5a", anchor="ne")
 
-    def draw_countdown(self, rem, open_, now):
+    def draw_countdown(self, rem, open_, now, speed):
+        """Countdown in Spielzeit: ab 1 Spieltag, die letzten 30 Spielsekunden werden einzeln abgezählt."""
         c = self.cv
         x0, y0 = self.lay["countdown"]
         W, H = MARKERS["countdown"][1], MARKERS["countdown"][2]
         cx, cy, R = x0 + W // 2, y0 + H // 2, 100
-        frac = max(0.0, min(1.0, rem / COUNTDOWN_FROM))
-        urgent = rem <= 60
-        speed = 6 if rem <= 10 else 3 if urgent else 1.5
-        pulse = 0.5 + 0.5 * math.sin(now * speed)
+        gr = rem * speed
+        frac = max(0.0, min(1.0, gr / COUNTDOWN_GAME))
+        final = gr <= FINAL_GAME
+        urgent = gr <= 180                                     # letzte 3 Spielminuten
+        pulse = 0.5 + 0.5 * math.sin(now * (6 if final else 3 if urgent else 1.5))
         col = mix("#ffb020", "#ff2d2d", 1 - frac)
-        if rem <= 10:                                          # roter Rahmen um den ganzen Bildschirm
+        if final:                                              # roter Rahmen um den ganzen Bildschirm
             c.create_rectangle(4, 4, self.W - 4, self.H - 4, width=8,
                                outline=mix("#400000", "#ff2020", pulse))
-        sec = int(rem)
+        sec = int(rem)                                         # Tick einmal pro echter Sekunde
         if sec != self.last_sec:
             self.last_sec = sec
-            if sec <= 10:
+            if final:
                 self.play("tick")
-        c.create_oval(cx - R - 16, cy - R - 16, cx + R + 16, cy + R + 16, fill="#0f1217", outline="#2b313c")
+        c.create_oval(cx - R - 16, cy - R - 16, cx + R + 16, cy + R + 16,
+                      fill=BG, stipple=PANEL_STIPPLE, outline=LINE)
         c.create_arc(cx - R, cy - R, cx + R, cy + R, start=0, extent=359.9, style="arc",
                      outline="#232832", width=10)
         if frac > 0:
             c.create_arc(cx - R, cy - R, cx + R, cy + R, start=90, extent=max(1.0, 360 * frac), style="arc",
                          outline=col, width=10 + (5 * pulse if urgent else 0))
-        size = 40
-        if rem <= 10:                                          # Herzschlag-Effekt pro Sekunde
-            size = 40 * (1 + 0.25 * (rem % 1) ** 3)
-        dcol = mix("#ffffff", "#ff3b30", pulse) if urgent else "#ffffff"
-        self.txt(cx, cy - 56, "BIS ZUR RATE", 9, "#8a93a3", anchor="center", shadow=0)
-        self.txt(cx, cy - 4, f"{sec // 60:02d}:{sec % 60:02d}", size, dcol, anchor="center", shadow=0)
-        self.txt(cx, cy + 46, f"FÄLLIG {nfmt(open_)}", 12, col, anchor="center", shadow=0)
+        dcol = mix("#ffffff", "#ff3b30", pulse) if urgent else TEXT
+        if final:
+            size = 54 * (1 + 0.2 * (rem % 1) ** 3)             # Herzschlag-Effekt pro echter Sekunde
+            self.txt(cx, cy - 56, "SPIELSEKUNDEN", 9, MUTED, anchor="center")
+            self.txt(cx, cy - 2, str(max(0, math.ceil(gr))), size, dcol, anchor="center")
+        else:
+            s = int(gr)
+            self.txt(cx, cy - 56, "BIS ZUR RATE (SPIELZEIT)", 8, MUTED, anchor="center")
+            self.fixed_text(cx, cy - 4, f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}", 26, dcol,
+                            anchor="center")
+        self.txt(cx, cy + 46, f"FÄLLIG {nfmt(open_)}", 12, col, anchor="center")
 
     def draw_banner(self, now):
         cur = self.cur_banner
@@ -671,11 +815,19 @@ class Client:
         if cur is None and self.bq:
             cur = self.cur_banner = self.bq.popleft()
             cur["t0"] = now
+            self.esc_flag = False
             if cur["sound"]:
                 self.play(cur["sound"])
         if cur is None:
+            self.esc_flag = False
             return
         t, total = now - cur["t0"], cur["secs"] + 2 * SLIDE
+        skippable = SLIDE + SKIP_AFTER <= t < total - SLIDE        # mind. 1 s voll sichtbar, noch nicht am Ausblenden
+        if self.esc_flag:
+            self.esc_flag = False
+            if skippable:                                          # ESC: sofort ausblenden
+                cur["t0"] = now - (cur["secs"] + SLIDE)
+                t, skippable = now - cur["t0"], False
         if t < SLIDE:
             p = 1 - (1 - t / SLIDE) ** 3
         elif t > total - SLIDE:
@@ -689,26 +841,53 @@ class Client:
         if cur["level"] == "alarm":
             col = mix(col, "#ffd0cc", 0.5 + 0.5 * math.sin(now * 10))
         c = self.cv
-        c.create_rectangle(bx + 4, y + 4, bx + w + 4, y + h + 4, fill="#050505", outline="")
-        c.create_rectangle(bx, y, bx + w, y + h, fill="#12151b", outline="#2b313c")
+        self.panel(bx, y, bx + w, y + h)
         c.create_rectangle(bx, y, bx + 8, y + h, fill=col, outline="")
         left = max(0.0, 1 - max(0.0, t - SLIDE) / max(0.1, cur["secs"]))
         c.create_rectangle(bx + 8, y + h - 3, bx + 8 + (w - 8) * left, y + h, fill=col, outline="")
-        self.txt(bx + 26, y + h / 2 - 1, cur["text"], 16, "#ffffff", anchor="w", shadow=0, width=w - 44)
+        tw = w - 44
+        if skippable:                                          # Skip-Hinweis: [ESC] >|
+            tw = w - 130
+            my, ix = y + h / 2, bx + w - 34
+            c.create_rectangle(bx + w - 100, my - 10, bx + w - 56, my + 10, outline="#6b7385")
+            self.txt(bx + w - 78, my, "ESC", 8, "#c9d1de", anchor="center")
+            c.create_polygon(ix, my - 7, ix + 10, my, ix, my + 7, fill="#c9d1de", outline="")
+            c.create_polygon(ix + 10, my - 7, ix + 20, my, ix + 10, my + 7, fill="#c9d1de", outline="")
+            c.create_rectangle(ix + 21, my - 7, ix + 23, my + 7, fill="#c9d1de", outline="")
+        self.txt(bx + 26, y + h / 2 - 1, cur["text"], 16, TEXT, anchor="w", width=tw)
 
     def update_window(self, st, now):
-        if not st or now - self.last_lbl < 0.5:
+        if now - self.last_lbl < 0.5:
             return
         self.last_lbl = now
+        ok = self.status == "Verbunden"
+        self.pw_status.config(text=f"● {self.status}", fg=GOOD if ok else WARN)
+        if not st:
+            return
         gc = self.game_clock(st)
-        clock = f"Spielzeit: {self.clock_txt(gc) if gc is not None else '--:--'}"
-        open_ = max(0, st["installment"] - st["paid"])
-        self.lbl.config(text=f"Schulden (alle): {nfmt(st['debt'])}\n"
-                             f"Fällig: {nfmt(open_)}  ({nfmt(st['paid'])}/{nfmt(st['installment'])}, "
-                             f"danach +{nfmt(st['step_amount'])})\n"
-                             f"Von dir gezahlt: {nfmt(st['mine'])}\nVerpasst: {st['missed']}\n"
-                             f"{clock}\nVerbindung: {self.status}")
-        self.macro_lbl.config(text=f"Strafe (einmalig):\n{st['macro'].strip()}")
+        self.pw["clock"].config(text=self.clock_txt(gc) if gc is not None else "--:--")
+        self.pw["debt"].config(text=nfmt(st["debt"]))
+        self.pw["mine"].config(text=nfmt(st["mine"]))
+        self.pw["missed"].config(text=str(st["missed"]))
+        self.pw_pending.config(text=f"{nfmt(st['pending'])} warten auf Bestätigung" if st["pending"] else "")
+        ratio, w = 0.0, max(1, self.pw_bar.winfo_width())
+        if st["active"]:
+            rem = max(0.0, st["remaining"] - (now - self.recv_at))
+            open_ = max(0, st["installment"] - st["paid"])
+            ratio = min(1.0, st["paid"] / st["installment"]) if st["installment"] else 0.0
+            self.pw_due.config(text=nfmt(open_), fg=ACCENT)
+            self.pw_paid.config(text=f"bezahlt {nfmt(st['paid'])} / {nfmt(st['installment'])}"
+                                     f"   ·   danach +{nfmt(st['step_amount'])}")
+            fr = self.frist_txt(st, rem)
+            self.pw_frist.config(text=(f"Frist: {fr}  ·  " if fr else "Frist: ") + spiel_rest(rem, st["speed"]))
+        else:
+            done = (st.get("total") or 0) > 0
+            self.pw_due.config(text="Getilgt" if done else "Keine Schulden", fg=GOOD if done else MUTED)
+            self.pw_paid.config(text="")
+            self.pw_frist.config(text="")
+        self.pw_bar.delete("all")
+        if ratio > 0:
+            self.pw_bar.create_rectangle(0, 0, w * ratio, 8, fill=GOOD, outline="")
 
 
 # ------------------------------------------------------------ MAIN
@@ -740,6 +919,7 @@ def main():
         ctypes.windll.shcore.SetProcessDpiAwareness(2)   # echte Pixel-Koordinaten
     except Exception:
         pass
+    set_app_id()
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", help="Adresse des Hosts (wird gespeichert)")
     ap.add_argument("--neu", action="store_true", help="gespeicherte Einstellungen verwerfen")
@@ -758,7 +938,7 @@ def main():
             print("Host und Name werden benötigt.")
         return
     print(f"Verbinde als {name} mit {host}:{PORT}   (Änderungen: --neu)")
-    print("Die Strafe läuft nur, wenn SCUM im Vordergrund ist. Notbremse: Strg+Shift+F12")
+    print("Die Strafe läuft nur, wenn SCUM im Vordergrund ist.")
 
     a = types.SimpleNamespace(host=host, port=PORT, name=name, game=GAME)
 
