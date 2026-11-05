@@ -710,6 +710,16 @@ class Client:
                 self.txt(x0 + w / 2, y, ch, size, fill, anchor=v)
             x0 += w
 
+    def disc(self, cx, cy, r, step=2):
+        """Runde, halbdurchsichtige Fläche: Kreise lassen sich nicht zuverlässig rastern, daher aus
+        dünnen gerasterten Streifen zusammengesetzt (gleicher Raster wie die anderen Anzeigen)."""
+        for y in range(-r, r, step):
+            h = (y + step / 2) ** 2
+            half = int(math.sqrt(max(0.0, r * r - h)))
+            if half > 0:
+                self.cv.create_rectangle(cx - half, cy + y, cx + half, cy + y + step,
+                                         fill=BG, stipple=PANEL_STIPPLE, outline="")
+
     def panel(self, x1, y1, x2, y2):
         """Halbdurchsichtiger Hintergrund (Raster), damit die Sicht aufs Spiel frei bleibt."""
         self.cv.create_rectangle(x1, y1, x2, y2, fill=BG, stipple=PANEL_STIPPLE, outline=LINE)
@@ -872,7 +882,8 @@ class Client:
             self.last_sec = sec
             if final:
                 self.play("tick")
-        self.panel(cx - R - 16, cy - R - 16, cx + R + 16, cy + R + 16)      # gleicher Look wie die anderen Anzeigen
+        self.disc(cx, cy, R + 16)                                          # runde, durchsichtige Scheibe
+        c.create_oval(cx - R - 16, cy - R - 16, cx + R + 16, cy + R + 16, outline=LINE)
         c.create_arc(cx - R, cy - R, cx + R, cy + R, start=0, extent=359.9, style="arc",
                      outline=LINE, width=3)
         if frac > 0:
