@@ -128,6 +128,7 @@ def save_layout_key(key, value):
 # ------------------------------------------------------------ SERVER
 SPEED = 3                       # Spielzeit läuft 3x so schnell
 DAY_REAL = 86400 / SPEED        # echte Sekunden pro Spieltag (= 8 Stunden)
+DEATH_PENALTY = DAY_REAL / 2    # Tod = ein halber Spieltag weniger auf dem Countdown der Schuld
 
 
 def virtual_screen(sw, sh):
@@ -204,6 +205,8 @@ class Server:
             self.players = d["players"]
         except Exception:
             pass
+        for k, v in dict(paused=False, pause_at=0.0, clock_paused=False, clock_frozen=0.0).items():
+            self.g.setdefault(k, v)
         for p in self.players.values():            # "all" = Summe über alle Schulden, "total" = nur aktuelle Schuld
             p.setdefault("all", p.get("total", 0))
         if self.g["macro"].strip() in OLD_DEFAULT_MACROS:
@@ -213,9 +216,9 @@ class Server:
         alive = self.g.get("alive")
         if alive:
             down = max(0.0, now - alive)
-            if self.g["next_due"] > 0:
+            if self.g["next_due"] > 0 and not self.g["paused"]:
                 self.g["next_due"] += down
-            if self.g["clock_game"] is not None:
+            if self.g["clock_game"] is not None and not self.g["clock_paused"]:
                 self.g["clock_real"] += down
             if down > 30:
                 print(f"Server war {down / 60:.0f} Min aus - Timer und Spielzeit waren pausiert.")
@@ -237,12 +240,14 @@ class Server:
         g = self.g
         if g["clock_game"] is None:
             return None
+        if g["clock_paused"]:
+            return g["clock_frozen"] % 86400
         now = time.time() if now is None else now
         return (g["clock_game"] + (now - g["clock_real"]) * SPEED) % 86400
 
     def set_clock(self, hh, mm):
         with self.lock:
-            self.g["clock_game"] = hh * 3600 + mm * 60
+            self.g["clock_game"] = self.g["clock_frozen"] = hh * 3600 + mm * 60
             self.g["clock_real"] = time.time()      # beeinflusst die Zahlungs-Fristen NICHT
             self.save()
 
@@ -293,6 +298,8 @@ class Server:
             for m in it:
                 if m.get("t") == "pay":
                     self.request_payment(name, int(m.get("amount", 0)))
+                elif m.get("t") == "death":                # Client hat den Tod-Bildschirm erkannt
+                    self.register_death(name, auto=True)
         except Exception:
             pass
         finally:
@@ -362,11 +369,17 @@ class Server:
                 t="state", active=active, debt=g["debt"], total=g["total"] or g["debt"],
                 installment=min(g["required"], g["debt"]), paid=g["paid"],
                 step_amount=g["step_amount"], missed=g["missed"],
-                remaining=max(0.0, g["next_due"] - time.time()) if active else 0,
+                remaining=max(0.0, g["next_due"] - self.script_now()) if active else 0,
+                paused=g["paused"], clock_paused=g["clock_paused"],
                 clock=self.game_secs(), speed=SPEED,
                 mine=self.players.get(name, {}).get("total", 0),
+                deaths=self.players.get(name, {}).get("deaths", 0),
                 pending=sum(x["amount"] for x in self.pending if x["name"] == name),
                 macro=g["macro"]))
+
+    def script_now(self):
+        """Zeit aus Sicht des Skripts: bei Pause bleibt sie auf dem Pausen-Zeitpunkt stehen."""
+        return self.g["pause_at"] if self.g["paused"] else time.time()
 
     def broadcast(self, text):
         for n in list(self.conns):
@@ -394,7 +407,7 @@ class Server:
             with self.lock:
                 g, now = self.g, time.time()
                 fired = False
-                if g["debt"] > 0 and g["next_due"] > 0 and now >= g["next_due"]:
+                if g["debt"] > 0 and g["next_due"] > 0 and not g["paused"] and now >= g["next_due"]:
                     g["missed"] += 1                       # Rate nicht erreicht -> Strafe (einmal)
                     fired = True
                     g["next_due"] = now + g["step_days"] * DAY_REAL   # Zeit startet neu bei "Danach +Tage"
@@ -442,7 +455,7 @@ class Server:
             n = self.settle()
             txt = f"{name} zahlt {amount}. Offen: {g['debt']}."
             if n:
-                days = (g["next_due"] - time.time()) / DAY_REAL
+                days = (g["next_due"] - self.script_now()) / DAY_REAL
                 txt += f" Rate erfüllt! Nächste: {min(g['required'], g['debt'])} in {days:.1f} Spieltagen."
             self.broadcast(txt)
         self.save()
@@ -463,9 +476,10 @@ class Server:
             first_days, step_days = max(0.01, first_days), max(0.01, step_days)
             self.g.update(debt=debt, total=debt, required=max(1, first_amount), paid=0,
                           step_days=step_days, step_amount=max(0, step_amount),
-                          next_due=time.time() + first_days * DAY_REAL if debt > 0 else 0.0)
+                          next_due=self.script_now() + first_days * DAY_REAL if debt > 0 else 0.0)
             for p in self.players.values():        # "Von dir gezahlt" beginnt mit der neuen Schuld bei 0
                 p["total"] = 0
+                p["death_log"] = []                # Tode der alten Schuld lassen sich nicht mehr zurückrechnen
             self.save()
 
     def set_macro(self, text):
@@ -489,8 +503,76 @@ class Server:
         """Frist auf X echte Sekunden ab jetzt setzen (zum Testen von Countdown und Strafe)."""
         with self.lock:
             if self.g["debt"] > 0:
-                self.g["next_due"] = time.time() + real_seconds
+                self.g["next_due"] = self.script_now() + real_seconds
                 self.save()
+
+    # ---- Tod
+    def register_death(self, name, auto=False):
+        """Tod eines Spielers: Countdown der Schuld -1/2 Spieltag. auto=True: vom Client erkannt."""
+        with self.lock:
+            now = time.time()
+            p = self.players.setdefault(name, dict(total=0, all=0, queued=False))
+            if auto and now - p.get("death_t", 0) < 30:      # doppelte Meldung desselben Todes
+                return False
+            g = self.g
+            applied = g["debt"] > 0 and g["next_due"] > 0
+            if applied:
+                g["next_due"] -= DEATH_PENALTY
+            p["death_t"] = now
+            p["deaths"] = p.get("deaths", 0) + 1
+            p.setdefault("death_log", []).append(applied)
+            p["death_log"] = p["death_log"][-50:]
+            self.broadcast(f"{name} ist gestorben: Frist -1/2 Spieltag." if applied
+                           else f"{name} ist gestorben.")
+            self.save()
+            return True
+
+    def revert_death(self, name):
+        """Letzten Tod eines Spielers zurücknehmen (Zähler -1, halber Spieltag wieder dazu)."""
+        with self.lock:
+            p = self.players.get(name)
+            if not p or p.get("deaths", 0) <= 0:
+                return False
+            log = p.get("death_log") or []
+            applied = log.pop() if log else False
+            p["deaths"] -= 1
+            p["death_t"] = 0
+            if applied and self.g["next_due"] > 0:
+                self.g["next_due"] += DEATH_PENALTY
+            self.broadcast(f"Tod von {name} wurde zurückgenommen.")
+            self.save()
+            return True
+
+    # ---- Pausen
+    def toggle_pause(self):
+        """Skript pausieren: Schulden-Countdown und Strafen stehen still, die Spielzeit läuft weiter."""
+        with self.lock:
+            g, now = self.g, time.time()
+            if g["paused"]:
+                if g["next_due"] > 0:
+                    g["next_due"] += now - g["pause_at"]
+                g["paused"] = False
+                self.broadcast("Skript läuft wieder.")
+            else:
+                g["paused"], g["pause_at"] = True, now
+                self.broadcast("Skript pausiert: Countdown steht.")
+            self.save()
+            return g["paused"]
+
+    def toggle_clock_pause(self):
+        """Nur die Spielzeit (Uhr) anhalten, der Schulden-Countdown läuft weiter."""
+        with self.lock:
+            g, now = self.g, time.time()
+            if g["clock_paused"]:
+                g["clock_game"], g["clock_real"] = g["clock_frozen"], now
+                g["clock_paused"] = False
+                self.broadcast("Spielzeit läuft wieder.")
+            elif g["clock_game"] is not None:
+                g["clock_frozen"] = self.game_secs(now)
+                g["clock_paused"] = True
+                self.broadcast("Spielzeit pausiert.")
+            self.save()
+            return g["clock_paused"]
 
     def forgive(self):
         with self.lock:
@@ -573,7 +655,7 @@ def admin_gui(srv):
 
     # ---- Debug
     df = ttk.LabelFrame(root, text="Debug (nur Host)")
-    df.grid(row=7, column=0, columnspan=6, padx=6, pady=4, sticky="ew")
+    df.grid(row=8, column=0, columnspan=6, padx=6, pady=4, sticky="ew")
 
     def debug_host():
         if not srv.fire_penalty_host():
@@ -597,10 +679,11 @@ def admin_gui(srv):
             messagebox.showerror("Makro-Fehler", str(e))
     ttk.Button(mf, text="Makro prüfen\n& speichern", command=save_macro).pack(padx=6)
 
-    tree = ttk.Treeview(root, columns=("n", "o", "t", "a"), show="headings", height=5)
-    for c, h in zip(("n", "o", "t", "a"), ("Spieler", "Online", "Diese Schuld", "Insgesamt")):
+    tree = ttk.Treeview(root, columns=("n", "o", "t", "a", "d"), show="headings", height=5,
+                        selectmode="browse")
+    for c, h in zip(("n", "o", "t", "a", "d"), ("Spieler", "Online", "Diese Schuld", "Insgesamt", "Tode")):
         tree.heading(c, text=h)
-        tree.column(c, width=90, anchor="center")
+        tree.column(c, width=74, anchor="center")
     tree.grid(row=5, column=0, columnspan=3, padx=6, pady=4)
 
     pf = ttk.LabelFrame(root, text="Offene Zahlungen")
@@ -617,6 +700,33 @@ def admin_gui(srv):
     side.pack(side="left")
     ttk.Button(side, text="Bestätigen", command=lambda: resolve(True)).pack(pady=2)
     ttk.Button(side, text="Ablehnen", command=lambda: resolve(False)).pack(pady=2)
+    # ---- Tod & Pausen
+    tf = ttk.LabelFrame(root, text="Tod & Pausen (Spieler vorher in der Tabelle auswählen)")
+    tf.grid(row=7, column=0, columnspan=6, padx=6, pady=4, sticky="ew")
+
+    def chosen():
+        s = tree.selection()
+        if not s:
+            messagebox.showinfo("Tod", "Bitte zuerst in der Tabelle einen Spieler auswählen.")
+            return None
+        return s[0]
+
+    def death_add():
+        n = chosen()
+        if n:
+            srv.register_death(n)
+
+    def death_undo():
+        n = chosen()
+        if n and not srv.revert_death(n):
+            messagebox.showinfo("Tod", f"{n} hat keine registrierten Tode.")
+    ttk.Button(tf, text="Tod registrieren (-1/2 Tag)", command=death_add).pack(side="left", padx=4, pady=4)
+    ttk.Button(tf, text="Tod zurücknehmen", command=death_undo).pack(side="left", padx=4)
+    pause_b = ttk.Button(tf, text="Skript pausieren", command=srv.toggle_pause)
+    pause_b.pack(side="left", padx=(16, 4))
+    clockp_b = ttk.Button(tf, text="Spielzeit pausieren", command=srv.toggle_clock_pause)
+    clockp_b.pack(side="left", padx=4)
+
     auto = tk.BooleanVar()
     ttk.Checkbutton(root, text="Zahlungen automatisch bestätigen", variable=auto,
                     command=lambda: setattr(srv, "auto_confirm", auto.get())
@@ -626,18 +736,26 @@ def admin_gui(srv):
         with srv.lock:
             g = srv.g
             gs = srv.game_secs()
-            clock_lbl.config(text=f"Spielzeit: {clock_txt(gs)}" if gs is not None
-                             else "Spielzeit: NICHT GESETZT ->")
+            clock_lbl.config(text=(f"Spielzeit: {clock_txt(gs)}" + (" (PAUSE)" if g["clock_paused"] else ""))
+                             if gs is not None else "Spielzeit: NICHT GESETZT ->")
+            pause_b.config(text="Skript fortsetzen" if g["paused"] else "Skript pausieren")
+            clockp_b.config(text="Spielzeit fortsetzen" if g["clock_paused"] else "Spielzeit pausieren")
             if g["next_due"] > 0 and g["debt"] > 0:
-                rem = max(0, g["next_due"] - time.time())
+                rem = max(0, g["next_due"] - srv.script_now())
                 due = f"{rem / DAY_REAL:.2f} Spieltagen ({hms(rem * SPEED)} Spielzeit)"
             else:
                 due = "-"
             info.config(text=f"Schulden: {g['debt']} | Rate: {g['paid']}/{min(g['required'], g['debt'])} "
-                             f"(danach +{g['step_amount']}) | Frist in {due} | Verpasst: {g['missed']}")
+                             f"(danach +{g['step_amount']}) | Frist in {due} | Verpasst: {g['missed']}"
+                             + (" | SKRIPT PAUSIERT" if g["paused"] else ""))
+            sel = tree.selection()
             tree.delete(*tree.get_children())
             for n, p in srv.players.items():
-                tree.insert("", "end", values=(n, "ja" if n in srv.conns else "-", p["total"], p.get("all", p["total"])))
+                tree.insert("", "end", iid=n, values=(n, "ja" if n in srv.conns else "-", p["total"],
+                                                      p.get("all", p["total"]), p.get("deaths", 0)))
+            keep = [s for s in sel if tree.exists(s)]
+            if keep:
+                tree.selection_set(keep)
             lb.delete(0, "end")
             pids.clear()
             for x in srv.pending:

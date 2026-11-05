@@ -48,13 +48,17 @@ CONFIG_FILE = os.path.join(BASE, "scum_depts_client.json")
 LAYOUT_FILE = os.path.join(BASE, "scum_depts_layout.json")
 MAX_SECS = 180                                  # Makro bricht spätestens nach 3 Min ab
 PIX_TOL = 45                                    # erlaubte Farbabweichung pro Kanal (0-255)
+DEATH_CONFIRM = 3.0                             # alle Tod-Pixel (3/3) müssen so lange (Sek.) durchgehend passen = Toleranz
+INGAME_GAP = 0.3                                # Sek. ohne passende Check-Pixel, bevor das Overlay ausgeblendet wird
+DEATH_GAP = 0.8                                 # so kurze Aussetzer (Sek.) unterbrechen die Erkennung nicht
+DEATH_IGNORE = 180                              # Sek. nach dem Makro: der nächste Tod-Bildschirm gilt als Makro-Tod
 
 # ---- Overlay-Design
 ALPHA = 0.93                       # Gesamt-Transparenz des Overlays
 PANEL_STIPPLE = "gray25"           # Hintergrund der Anzeigen: gray12 = fast unsichtbar ... gray50 = dichter
 COUNTDOWN_GAME = 86400             # Countdown-Uhr ab 1 Spieltag Restzeit (Spielsekunden)
 FINAL_GAME = 30                    # letzte halbe Spielminute wird sekundengenau abgezählt
-HOUR_MARKS = (9, 6, 3)             # Meldungen bei noch 9 / 6 / 3 Spielstunden (zusätzlich: jeder volle Tag)
+HOUR_MARKS = (15, 9, 6, 3)         # Meldungen bei noch 15 / 9 / 6 / 3 Spielstunden (zusätzlich: jeder volle Tag)
 SKIP_AFTER = 1.0                   # Meldung per ESC überspringen, wenn sie mind. so lange (Sek.) sichtbar war
 SLIDE = 0.35                       # Ein-/Ausblend-Dauer der Meldungen
 FONT_PREFERENCE = ["Bahnschrift", "Agency FB", "Segoe UI Semibold", "Segoe UI"]
@@ -146,6 +150,9 @@ MARKERS = {   # key: (Beschriftung, Breite, Höhe)
     "check1": ("Check 1", 40, 40),
     "check2": ("Check 2", 40, 40),
     "check3": ("Check 3", 40, 40),
+    "dead1": ("Tod 1", 40, 40),
+    "dead2": ("Tod 2", 40, 40),
+    "dead3": ("Tod 3", 40, 40),
 }
 
 
@@ -164,7 +171,8 @@ def load_layout(sw, sh):
          "banner": [sw // 2 - 350, 60], "payment": [100, 100],
          "p1": [sw // 2 - 100, sh // 2], "p2": [sw // 2 + 100, sh // 2],
          "check1": [sw // 2 - 100, sh - 150], "check2": [sw // 2, sh - 150],
-         "check3": [sw // 2 + 100, sh - 150]}
+         "check3": [sw // 2 + 100, sh - 150],
+         "dead1": [sw // 2 - 100, sh - 250], "dead2": [sw // 2, sh - 250], "dead3": [sw // 2 + 100, sh - 250]}
     try:
         with open(LAYOUT_FILE, encoding="utf-8") as f:
             d.update(json.load(f))
@@ -288,10 +296,14 @@ class Client:
         self.last_lbl, self.last_err = 0.0, None
         self.icon, self.win_icon, self.fam = None, None, "Segoe UI"
         self.cw = {}                                # Zellbreiten für feste Ziffern (pro Schriftgröße)
-        self.visible, self.miss, self.last_chk, self.last_frame = True, 0, 0.0, None
+        self.visible, self.last_ok, self.last_chk, self.last_frame = True, 0.0, 0.0, None
         self.esc_flag = False
         self.busy = False
         self.saved = False
+        # Tod-Erkennung
+        self.dead_since, self.dead_last, self.dead_done, self.dead_skip = None, 0.0, False, False
+        self.last_dead_chk = 0.0
+        self.ignore_death, self.ignore_until = False, None      # Makro verursacht selbst einen Tod
 
     def net_loop(self):
         while True:
@@ -320,7 +332,9 @@ class Client:
             low = m["text"].lower()
             if low.startswith("neue schulden"):
                 return
-            if "nicht bezahlt" in low or "strafe" in low:
+            if "gestorben" in low:
+                lvl = "warn"
+            elif "nicht bezahlt" in low or "strafe" in low:
                 lvl = "alarm"
             elif "zahlt" in low or "erfüllt" in low or "getilgt" in low or "erlassen" in low:
                 lvl = "good"
@@ -366,7 +380,7 @@ class Client:
         return x + w // 2, y + h // 2
 
     def in_play(self):
-        """Pixel-Check: True wenn die Check-Punkte zum aufgenommenen Spielzustand passen."""
+        """Pixel-Check: True wenn ALLE Check-Punkte zum aufgenommenen Spielzustand passen."""
         cols = self.lay.get("check_colors") or {}
         if not cols:
             return True
@@ -377,7 +391,58 @@ class Client:
                     ok += 1
             except Exception:
                 pass
-        return ok * 2 > len(cols)
+        return ok == len(cols)                         # alle Pixel müssen passen (3/3)
+
+    # ---- Tod-Erkennung (Pixel-Check auf den "You are dead"-Bildschirm)
+    def dead_match(self):
+        """True, wenn ALLE Tod-Pixel passen; None = keine Tod-Farben im Setup aufgenommen."""
+        cols = self.lay.get("dead_colors") or {}
+        if not cols:
+            return None
+        ok = 0
+        for k, ref in cols.items():
+            try:
+                if pixel_match(get_pixel(*self.point(k)), ref):
+                    ok += 1
+            except Exception:
+                pass
+        return ok == len(cols)                         # alle Pixel müssen passen (3/3)
+
+    def ignoring_death(self, now):
+        if self.busy:
+            return True
+        if self.ignore_death and self.ignore_until is not None and now > self.ignore_until:
+            self.ignore_death = False                  # Makro hat nicht getötet: Schutz läuft ab
+        return self.ignore_death
+
+    def check_death(self, now):
+        """Meldet einen Tod an den Server, wenn der Tod-Bildschirm DEATH_CONFIRM Sekunden durchgehend
+        erkannt wird. Ein vom Makro verursachter Tod wird ignoriert (sonst doppelte Strafe)."""
+        if now - self.last_dead_chk < 0.25:
+            return
+        self.last_dead_chk = now
+        m = self.dead_match()
+        if m is None:
+            return
+        if m and not game_in_front(self.a.game):
+            m = False
+        if m:
+            self.dead_last = now
+            if self.dead_since is None:                # neuer Tod-Bildschirm beginnt
+                self.dead_since, self.dead_done = now, False
+                self.dead_skip = self.ignoring_death(now)
+            if not self.dead_done and now - self.dead_since >= DEATH_CONFIRM:
+                self.dead_done = True
+                if self.dead_skip or self.ignoring_death(now):
+                    self.ignore_death = False          # Makro-Tod verbraucht, nicht melden
+                    return
+                try:
+                    if self.sock:
+                        send(self.sock, {"t": "death"})
+                except Exception:
+                    pass
+        elif self.dead_since is not None and now - self.dead_last > DEATH_GAP:
+            self.dead_since, self.dead_done = None, False   # Bildschirm weg (oder nur Fehlalarm)
 
     # ---- Strafe: Makro (einmalig; Whitelist, nur im Spiel, wird sofort ausgeführt)
     def run_macro(self, text):
@@ -389,6 +454,7 @@ class Client:
         from pynput.keyboard import Controller as KC, Key
         from pynput.mouse import Controller as MC, Button
         self.busy = True
+        self.ignore_death, self.ignore_until = True, None      # ein Tod während/nach dem Makro zählt nicht
         kb, ms = KC(), MC()
         K = lambda n: n if len(n) == 1 else getattr(Key, n)
         warned = [False]
@@ -424,6 +490,7 @@ class Client:
                     ms.click(Button.left if st[1] == "left" else Button.right)
         finally:
             self.busy = False
+            self.ignore_until = time.monotonic() + DEATH_IGNORE
             self.banner("Strafe beendet.", 4, "info")
 
     # ---- GUI
@@ -519,7 +586,7 @@ class Client:
         rows.columnconfigure(1, weight=1)
         self.pw = {}
         for i, (key, label) in enumerate((("debt", "Dept gesamt"), ("mine", "Von dir gezahlt"),
-                                          ("missed", "Verpasst"), ("clock", "Spielzeit"))):
+                                          ("missed", "Verpasst"), ("deaths", "Tode"), ("clock", "Spielzeit"))):
             tk.Label(rows, text=label, font=F(10), fg=MUTED, bg=BG).grid(row=i, column=0, sticky="w", pady=1)
             self.pw[key] = tk.Label(rows, text="-", font=F(10, True), fg=TEXT, bg=BG)
             self.pw[key].grid(row=i, column=1, sticky="e", pady=1)
@@ -562,6 +629,12 @@ class Client:
         except Exception:
             self.stat.config(text="Ungültiger Betrag oder keine Verbindung.", fg=WARN)
 
+    def rem_now(self, st, now):
+        """Restzeit bis zur Frist in echten Sekunden; steht still, solange das Skript pausiert ist."""
+        if st.get("paused"):
+            return max(0.0, st["remaining"])
+        return max(0.0, st["remaining"] - (now - self.recv_at))
+
     @staticmethod
     def fmt(sec):
         sec = int(max(0, sec))
@@ -578,6 +651,8 @@ class Client:
         """Spielzeit (Sekunden des Tages), vom Server-Stand hochgerechnet; None = nicht gesetzt."""
         if st.get("clock") is None:
             return None
+        if st.get("clock_paused"):
+            return st["clock"] % 86400
         return (st["clock"] + (time.monotonic() - self.recv_at + extra) * st["speed"]) % 86400
 
     # ---- Schrift, Töne, Symbol
@@ -651,16 +726,17 @@ class Client:
         self.root.after(33, self.draw)      # ~30 Bilder/s für die Animationen
 
     def update_visibility(self, now):
-        """Pixel-Check alle 0.4 s: im Spiel -> Overlay sichtbar, sonst komplett ausgeblendet."""
-        if now - self.last_chk < 0.4:
+        """Pixel-Check alle 0.1 s: im Spiel -> Overlay sichtbar, sonst nach INGAME_GAP komplett ausgeblendet."""
+        if now - self.last_chk < 0.1:
             return
         self.last_chk = now
         try:
             ok = self.in_play()
         except Exception:
             ok = True
-        self.miss = 0 if ok else self.miss + 1
-        self.visible = ok or self.miss < 2          # erst nach 2 Fehlschlägen ausblenden (kein Flackern)
+        if ok:
+            self.last_ok = now
+        self.visible = ok or now - self.last_ok < INGAME_GAP     # kurze Aussetzer: nicht flackern
 
     def _draw(self):
         now, st = time.monotonic(), self.state
@@ -669,16 +745,17 @@ class Client:
         self.cv.delete("all")
         rem, open_ = None, 0
         if st and st["active"]:
-            rem = max(0.0, st["remaining"] - (now - self.recv_at))
+            rem = self.rem_now(st, now)
             open_ = max(0, st["installment"] - st["paid"])
             self.check_reminders(st, rem, open_, now)
         else:
             self.last_rem = None
         self.update_visibility(now)
+        self.check_death(now)
         if self.visible:
             self.draw_stats(st, rem, open_, now)
             if rem is not None and open_ > 0 and rem * st["speed"] <= COUNTDOWN_GAME:
-                self.draw_countdown(rem, open_, now, st["speed"])
+                self.draw_countdown(rem, open_, now, st["speed"], bool(st.get("paused")))
             self.draw_banner(now)
         else:                                       # nicht im Spiel: nichts zeichnen, Meldungen warten
             self.esc_flag = False
@@ -687,7 +764,7 @@ class Client:
         self.update_window(st, now)
 
     def check_reminders(self, st, rem, open_, now):
-        """Meldungen in SPIELZEIT: jeder volle Tag, dann bei 9 / 6 / 3 Spielstunden."""
+        """Meldungen in SPIELZEIT: jeder volle Tag, dann bei 15 / 9 / 6 / 3 Spielstunden."""
         lr, sp = self.last_rem, st["speed"]
         if lr is not None and rem <= lr + 5 and open_ > 0:      # sonst: erster Stand oder neue Runde
             g, lg = rem * sp, lr * sp
@@ -719,6 +796,8 @@ class Client:
         gr = rem * st["speed"] if (st and rem is not None) else None     # Restzeit in Spielsekunden
         if gr is None:
             col = MUTED
+        elif st.get("paused"):
+            col = ACCENT
         elif gr <= 3 * 3600:
             col = mix("#ff6b35", "#ff2d2d", pulse)
         elif gr <= 86400:
@@ -735,20 +814,24 @@ class Client:
         self.txt(tx, sy + 12 + (ih or 20) / 2, "DEPT", 13, "#c9d1de", anchor="w")
         top = 12 + max(ih, 32) + 8                  # Inhalt beginnt unterhalb des Symbols
         gc = self.game_clock(st) if st else None
-        self.txt(sx + W - 14, sy + 12, "UHRZEIT", 8, MUTED, anchor="ne")
+        cpaused = bool(st and st.get("clock_paused"))
+        self.txt(sx + W - 14, sy + 12, "UHRZEIT · PAUSE" if cpaused else "UHRZEIT", 8,
+                 ACCENT if cpaused else MUTED, anchor="ne")
         if gc is None:
             self.txt(sx + W - 14, sy + 24, "--:--", 22, TEXT, anchor="ne")
         else:
             clock = f"{int(gc // 3600):02d}:{int(gc % 3600 // 60):02d}"
             self.fixed_text(sx + W - 14, sy + 24, clock, 22, TEXT, anchor="ne",
-                            colon=int(now) % 2 == 0)             # Doppelpunkt blinkt im Sekundentakt
+                            colon=cpaused or int(now) % 2 == 0)  # Doppelpunkt blinkt im Sekundentakt (Pause: aus)
         if st and st["active"]:
             self.txt(sx + 14, sy + top, "FÄLLIG", 9, MUTED)
             self.txt(sx + 14, sy + top + 12, nfmt(open_), 30, col)
             self.txt(sx + 14, sy + top + 54, "REST (SPIELZEIT)", 9, MUTED)
             self.txt(sx + 14, sy + top + 66, spiel_rest(rem, st["speed"]), 18, TEXT)
             fr = self.frist_txt(st, rem)
-            if fr:
+            if st.get("paused"):
+                self.txt(sx + 14, sy + top + 94, "PAUSIERT - Countdown steht", 10, ACCENT)
+            elif fr:
                 self.txt(sx + 14, sy + top + 94, f"Frist: {fr}", 9, MUTED, bold=False)
         elif st:
             done = (st.get("total") or 0) > 0
@@ -769,7 +852,7 @@ class Client:
                 self.txt(sx + W - 14, sy + H - 20, f"{nfmt(st['pending'])} warten auf Bestätigung", 9,
                          "#ffcf5a", anchor="ne")
 
-    def draw_countdown(self, rem, open_, now, speed):
+    def draw_countdown(self, rem, open_, now, speed, paused=False):
         """Countdown in Spielzeit: ab 1 Spieltag, die letzten 30 Spielsekunden werden einzeln abgezählt."""
         c = self.cv
         x0, y0 = self.lay["countdown"]
@@ -777,8 +860,8 @@ class Client:
         cx, cy, R = x0 + W // 2, y0 + H // 2, 100
         gr = rem * speed
         frac = max(0.0, min(1.0, gr / COUNTDOWN_GAME))
-        final = gr <= FINAL_GAME
-        urgent = gr <= 180                                     # letzte 3 Spielminuten
+        final = gr <= FINAL_GAME and not paused
+        urgent = gr <= 180 and not paused                      # letzte 3 Spielminuten
         pulse = 0.5 + 0.5 * math.sin(now * (6 if final else 3 if urgent else 1.5))
         col = mix("#ffb020", "#ff2d2d", 1 - frac)
         if final:                                              # roter Rahmen um den ganzen Bildschirm
@@ -803,7 +886,8 @@ class Client:
             self.txt(cx, cy - 2, str(max(0, math.ceil(gr))), size, dcol, anchor="center")
         else:
             s = int(gr)
-            self.txt(cx, cy - 56, "BIS ZUR RATE (SPIELZEIT)", 8, MUTED, anchor="center")
+            self.txt(cx, cy - 56, "PAUSIERT" if paused else "BIS ZUR RATE (SPIELZEIT)", 8,
+                     ACCENT if paused else MUTED, anchor="center")
             self.fixed_text(cx, cy - 4, f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}", 26, dcol,
                             anchor="center")
         self.txt(cx, cy + 46, f"FÄLLIG {nfmt(open_)}", 12, col, anchor="center")
@@ -869,17 +953,22 @@ class Client:
         self.pw["debt"].config(text=nfmt(st["debt"]))
         self.pw["mine"].config(text=nfmt(st["mine"]))
         self.pw["missed"].config(text=str(st["missed"]))
+        self.pw["deaths"].config(text=str(st.get("deaths", 0)))
         self.pw_pending.config(text=f"{nfmt(st['pending'])} warten auf Bestätigung" if st["pending"] else "")
         ratio, w = 0.0, max(1, self.pw_bar.winfo_width())
         if st["active"]:
-            rem = max(0.0, st["remaining"] - (now - self.recv_at))
+            rem = self.rem_now(st, now)
             open_ = max(0, st["installment"] - st["paid"])
             ratio = min(1.0, st["paid"] / st["installment"]) if st["installment"] else 0.0
             self.pw_due.config(text=nfmt(open_), fg=ACCENT)
             self.pw_paid.config(text=f"bezahlt {nfmt(st['paid'])} / {nfmt(st['installment'])}"
                                      f"   ·   danach +{nfmt(st['step_amount'])}")
             fr = self.frist_txt(st, rem)
-            self.pw_frist.config(text=(f"Frist: {fr}  ·  " if fr else "Frist: ") + spiel_rest(rem, st["speed"]))
+            if st.get("paused"):
+                self.pw_frist.config(text="PAUSIERT  ·  " + spiel_rest(rem, st["speed"]), fg=ACCENT)
+            else:
+                self.pw_frist.config(text=(f"Frist: {fr}  ·  " if fr else "Frist: ") + spiel_rest(rem, st["speed"]),
+                                     fg=TEXT)
         else:
             done = (st.get("total") or 0) > 0
             self.pw_due.config(text="Getilgt" if done else "Keine Schulden", fg=GOOD if done else MUTED)

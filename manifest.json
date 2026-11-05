@@ -2,7 +2,7 @@
  "files": [
   {
    "path": "scum_depts_client.py",
-   "sha256": "a0f3609216c1fe970ff4854c80204d0c13f2b555af82ae8b4fc34ae7b8fe0ecb"
+   "sha256": "7425fdeeeffcf200cc5af8d451b27963bf8ab581e9bdc19108ae82382176b9a6"
   },
   {
    "path": "scum_depts_launcher.pyw",
@@ -10,7 +10,7 @@
   },
   {
    "path": "scum_depts_setup.py",
-   "sha256": "79e21029237f032c79fe7cfb7f4876c9d89e5e9a6d31a25788847ad8dfefdc7c"
+   "sha256": "80ccdbbf73629d987e8fbe13e33675dcc11929470a225aac7d93db2e56e4180e"
   },
   {
    "path": "images/app.ico",
