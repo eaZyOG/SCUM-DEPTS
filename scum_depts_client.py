@@ -872,10 +872,9 @@ class Client:
             self.last_sec = sec
             if final:
                 self.play("tick")
-        c.create_oval(cx - R - 16, cy - R - 16, cx + R + 16, cy + R + 16,
-                      fill=BG, stipple=PANEL_STIPPLE, outline=LINE)
+        self.panel(cx - R - 16, cy - R - 16, cx + R + 16, cy + R + 16)      # gleicher Look wie die anderen Anzeigen
         c.create_arc(cx - R, cy - R, cx + R, cy + R, start=0, extent=359.9, style="arc",
-                     outline="#232832", width=10)
+                     outline=LINE, width=3)
         if frac > 0:
             c.create_arc(cx - R, cy - R, cx + R, cy + R, start=90, extent=max(1.0, 360 * frac), style="arc",
                          outline=col, width=10 + (5 * pulse if urgent else 0))
