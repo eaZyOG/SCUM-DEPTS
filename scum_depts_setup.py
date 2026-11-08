@@ -291,17 +291,17 @@ def setup_ui():
         wins[k] = t
 
     ttk.Label(root, justify="left", padding=10, text=(
-        "Ziehe die farbigen Fenster an die gewünschte Stelle\n"
-        "(Spiel dafür im gleichen Modus wie später laufen lassen).\n"
-        "Punkt 1-2: Mittelpunkt = Zielpunkt für 'moveto p1' im Makro.\n"
-        "Bei Punkten und Checks zeigt der ROTE PUNKT im Fadenkreuz den genauen Pixel.\n"
-        "Beim Ziehen erscheint eine LUPE (11x11 Pixel): der rot umrandete Pixel in der Mitte\n"
-        "ist der Zielpixel, daneben stehen Position und Farbe. Beim Anklicken blinken die Fenster kurz.\n"
-        "Check 1-3 (lila): über Bildelemente legen, die NUR im normalen Spiel zu sehen\n"
-        "sind (z.B. Lebensanzeige/Hotbar), nicht im Menü - dann 'Farben aufnehmen'.\n"
-        "Tod 1-3 (rot): über Bildelemente legen, die NUR auf dem 'You are dead'-Bildschirm\n"
-        "zu sehen sind (z.B. die roten Pixel) - dann im Tod-Bildschirm 'Tod-Farben aufnehmen'.\n"
-        "Nicht unter die Anzeige-Fenster legen!")).pack()
+        "1. IP Adresse und Namen eintragen.\n"
+        "2. SANDBOX betreten.\n"
+        "3. Meldungen auf eine gewünschte Position verschieben, dass zeigt dir aktuelle Mitteilungen an. (Empfehlung oben am Rand)\n"
+        "4. Countdown auf eine gewünschte Position verschieben, dass zeigt dir den Countdown an wenn die Zeit knapp wird. (Empfehlung oben am Rand unter Meldungen)\n"
+        "5. Schulden-Anzeige auf eine gewünschte Position verschieben, dass zeigt dir den Countdown an wenn die Zeit knapp wird. (Empfehlung rechts oben etwas versetzt am Rand wegen Airdrop.)\n"
+        "6. Zahlungsfenster auf den zweiten Bildschirm Positionieren, damit zahlst du die Schulden.\n"
+        "7. Check 1-3 auf das Mikrofon-, Augen- und auf das HANDS-symbol legen (Weiß).\n"
+        "8. Auf Farben aufnehmen drücken und danach einmal testen, es sollte 3/3 zeigen, im Menü oder Inventar sollte 0/3 erscheinen.\n"
+        "9. Drücke ESC und lege Punkt 1 auf \"Commit Suicide\" und Punkt 2 auf Yes beim betätigen.\n"
+        "10. Begehe Selbstmord und lege Tod 1-3 auf das Rote \"Prisoner Died\" links, rechts und mittig.\n"
+        "11. Gehe auf Tod-Farben aufnehmen und teste es mit Tod testen, nach dem Respawn sollte es 0/3 anzeigen.")).pack()
 
     CHECKS = ("check1", "check2", "check3")
     DEADS = ("dead1", "dead2", "dead3")
